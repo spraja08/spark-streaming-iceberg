@@ -1,5 +1,5 @@
 {
-  "app_name": "MoviesETL",
-  "source_data_path": "data/ml-latest-small",
-  "output_data_path": "data/output"
+  "app_name": "RetailCDP",
+  "source_data_path": "s3://rspamzn-retail-dataset/inputs/",
+  "output_data_path": "s3://rspamzn-retail-dataset/outputs/"
 }
