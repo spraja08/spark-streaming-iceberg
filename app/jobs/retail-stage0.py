@@ -3,6 +3,7 @@ from pyspark.sql.functions import sum as _sum
 from pyspark.sql.types import StructType, StructField, StringType, FloatType, IntegerType, TimestampType
 from pyspark.sql import SparkSession
 from pyspark.sql.streaming import DataStreamWriter
+from pyspark.sql.functions import rand
 
 def _extract_data(spark, config):
     schema = StructType([StructField("id", IntegerType()),
@@ -24,47 +25,44 @@ def _extract_data(spark, config):
         .option("path", config.get('source_data_path'))
         .load())
 
+def _create_data(spark, config):
+    return( spark.readStream.format( "rate" ) \
+            .option( "rowsPerSecond", 1 ) \
+            .load() )
 
 def _transform_data(raw_df):
-    transformed_stream = raw_df.select(
-        col("CustomerID"), 
-        col("StockCode"), 
-        col("InvoiceTimestamp"),
-        col("Quantity"),
-        col("UnitPrice"))
-    return (transformed_stream 
-            .withWatermark("InvoiceTimestamp", "3 minutes") 
-            .groupBy(  
-                    window( col("InvoiceTimestamp"), "10 minutes"), 
-                    col( "StockCode" ) ) 
-            .agg( _sum( "Quantity" ).alias( "total_sales")))
+    df = raw_df.withColumn( "customer_id", ( rand( seed=42 ) * 10 ).cast( "int" ) ) \
+            .withColumn( "product_id", ( rand( seed=42 ) * 10 ).cast( "int" ) ) \
+            .withColumn( "store_id", ( rand( seed=42 ) * 10 ).cast( "int" ) ) \
+            .withColumn( "quantity", ( rand( seed=42 ) * 10 ).cast( "int" ) ) \
+            .withColumnRenamed( "value", "id" ) 
+    return( df.withColumn( "unit_price", ( df[ "product_id" ] + 1 ).cast( "float" ) ) )
 
-
-def _load_data(config, aggregated_stream):
-    result = aggregated_stream.select("StockCode", 
-                aggregated_stream.window.start.cast("string").alias("start"), 
-                aggregated_stream.window.end.cast("string").alias("end"), 
-                "total_sales")
-
-    result.writeStream \
+def _load_data(config, stream):
+    stream.writeStream \
             .outputMode("append") \
             .format("iceberg") \
-            .option("path", "my_catalog.my_ns.my_retail_agg_table" ) \
-            .option("checkpointLocation", "checkpoint-loc-iceberg-xyz7") \
-            .trigger(processingTime='1 minutes') \
+            .option("path", "my_catalog.my_ns.my_retail_raw_evets" ) \
+            .option("checkpointLocation", "checkpoint-loc-iceberg-raw2") \
+            .trigger(processingTime='3 minutes') \
+            .option( "fanout-enabled", "true" ) \
             .start() \
             .awaitTermination()
                   
 def run_job(spark, config):
-    spark.sql("""CREATE TABLE IF NOT EXISTS my_catalog.my_ns.my_retail_agg_table ( 
-                                       StockCode int,
-                                       start string, 
-                                       end string,
-                                       total_sales double)
+    spark.sql("""CREATE TABLE IF NOT EXISTS my_catalog.my_ns.my_retail_raw_evets ( 
+                                       timestamp timestamp,
+                                       id long, 
+                                       customer_id int,
+                                       product_id int,
+                                       store_id int,
+                                       quantity int,
+                                       unit_price float )
             USING iceberg
-            LOCATION 's3://iceberg-bucket/my/key/prefix/my_ns.db/my_retail_agg_table'
+            PARTITIONED BY (product_id)
+            LOCATION 's3://iceberg-bucket/my/key/prefix/my_ns.db/my_retail_raw_evets'
             TBLPROPERTIES( 
             'serializationLib' = 'org.apache.hadoop.hive.ql.io.parquet.serde.ParquetHiveSerDe',
             'inputFormat' = 'org.apache.hadoop.hive.ql.io.parquet.MapredParquetInputFormat',
             'outputFormat' = 'org.apache.hadoop.hive.ql.io.parquet.MapredParquetOutputFormat')""")
-    _load_data(config, _transform_data(_extract_data(spark, config)))
+    _load_data(config, _transform_data(_create_data(spark, config)))
